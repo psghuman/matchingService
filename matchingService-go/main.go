@@ -1,117 +1,262 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"log"
-	"net"
+	"math/rand"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/gorilla/mux"
+	"github.com/gorilla/websocket"
 )
 
-//ipRange - a structure that holds the start and end of a range of ip addresses
-type ipRange struct {
-	start net.IP
-	end   net.IP
+type playerStruct struct {
+	ID        string          `json:"id"`
+	MatchedID string          `json:"matched_id"`
+	IsHost    bool            `json:"is_host"`
+	Ws        *websocket.Conn `json:"-"`
 }
 
-// inRange - check to see if a given ip address is within a range given
-func inRange(r ipRange, ipAddress net.IP) bool {
-	// strcmp type byte comparison
-	if bytes.Compare(ipAddress, r.start) >= 0 && bytes.Compare(ipAddress, r.end) < 0 {
-		return true
+type roomStruct struct {
+	Code string `json:"room_code"`
+}
+
+func (p playerStruct) match(mp *playerStruct, matchID uint64) *playerStruct {
+	match := strconv.FormatUint(matchID, 10)
+	mp.ID = match + "_host"
+	p.ID = match + "_client"
+	mp.MatchedID = p.ID
+	p.MatchedID = mp.ID
+	err := mp.Ws.WriteJSON(&mp)
+	if err != nil {
+		mp.Ws.Close()
+		return &p
 	}
-	return false
+	err = p.Ws.WriteJSON(p)
+	if err != nil {
+		p.Ws.Close()
+		return mp
+	}
+	p.Ws.Close()
+	mp.Ws.Close()
+	return nil
 }
 
-var privateRanges = []ipRange{
-	ipRange{
-		start: net.ParseIP("10.0.0.0"),
-		end:   net.ParseIP("10.255.255.255"),
-	},
-	ipRange{
-		start: net.ParseIP("100.64.0.0"),
-		end:   net.ParseIP("100.127.255.255"),
-	},
-	ipRange{
-		start: net.ParseIP("172.16.0.0"),
-		end:   net.ParseIP("172.31.255.255"),
-	},
-	ipRange{
-		start: net.ParseIP("192.0.0.0"),
-		end:   net.ParseIP("192.0.0.255"),
-	},
-	ipRange{
-		start: net.ParseIP("192.168.0.0"),
-		end:   net.ParseIP("192.168.255.255"),
-	},
-	ipRange{
-		start: net.ParseIP("198.18.0.0"),
-		end:   net.ParseIP("198.19.255.255"),
-	},
-}
+var privateClients sync.Map
+var registeredClients sync.Map
+var publicClients = make(chan *playerStruct, 1000)
+var upgrader = websocket.Upgrader{}
+var id uint64
 
-// isPrivateSubnet - check to see if this ip is in a private subnet
-func isPrivateSubnet(ipAddress net.IP) bool {
-	// my use case is only concerned with ipv4 atm
-	if ipCheck := ipAddress.To4(); ipCheck != nil {
-		// iterate over all our ranges
-		for _, r := range privateRanges {
-			// check if this ip is in a private range
-			if inRange(r, ipAddress) {
-				return true
-			}
+const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+const (
+	letterIdxBits = 6                    // 6 bits to represent a letter index
+	letterIdxMask = 1<<letterIdxBits - 1 // All 1-bits, as many as letterIdxBits
+	letterIdxMax  = 63 / letterIdxBits   // # of letter indices fitting in 63 bits
+)
+
+var src = rand.NewSource(time.Now().UnixNano())
+
+func randStringBytesMaskImprSrcSB(n int) string {
+	sb := strings.Builder{}
+	sb.Grow(n)
+	// A src.Int63() generates 63 random bits, enough for letterIdxMax characters!
+	for i, cache, remain := n-1, src.Int63(), letterIdxMax; i >= 0; {
+		if remain == 0 {
+			cache, remain = src.Int63(), letterIdxMax
 		}
-	}
-	return false
-}
-
-func getIPAdress(w http.ResponseWriter, r *http.Request) string {
-	for _, h := range []string{"X-Forwarded-For", "X-Real-Ip"} {
-		addresses := strings.Split(r.Header.Get(h), ",")
-		// march from right to left until we get a public address
-		// that will be the address right before our proxy.
-		for i := len(addresses) - 1; i >= 0; i-- {
-			ip := strings.TrimSpace(addresses[i])
-			// header can contain spaces too, strip those out.
-			realIP := net.ParseIP(ip)
-			if !realIP.IsGlobalUnicast() || isPrivateSubnet(realIP) {
-				// bad address, go to next
-				continue
-			}
-			w.WriteHeader(http.StatusOK)
-			return ip
+		if idx := int(cache & letterIdxMask); idx < len(letterBytes) {
+			sb.WriteByte(letterBytes[idx])
+			i--
 		}
+		cache >>= letterIdxBits
+		remain--
 	}
-	w.WriteHeader(http.StatusOK)
-	return ""
+
+	return sb.String()
 }
 
-func healthCheck(w http.ResponseWriter, r *http.Request) {
-	resp := map[string]string{
-		"message": "Service is running at 8001 port",
+func listenWebSocketConn(conn *websocket.Conn, sendConn *websocket.Conn, isConnHost bool, loginID string) {
+	timeout := time.Now().Add(time.Second * 60)
+	conn.SetReadDeadline(timeout)
+	sendConn.SetWriteDeadline(timeout)
+	var message interface{}
+	for {
+		err := conn.ReadJSON(&message)
+		if err != nil {
+			log.Println(err)
+			break
+		}
+		// TODO: add validation before forwarding a message
+		err = sendConn.WriteJSON(&message)
+		if err != nil {
+			log.Println(err)
+			break
+		}
+		log.Println(loginID + ": forwarded a message")
 	}
-	w.Header().Add("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
+	log.Println("Timed-out/Done so closing connection for " + loginID)
+	if isConnHost {
+		conn.Close()
+		sendConn.Close()
+	}
 }
 
 func main() {
-	// server setup
-	mux := http.NewServeMux()
-	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		healthCheck(w, r)
-	}))
-	mux.Handle("/findMatch", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Println(getIPAdress(w, r))
-	}))
-	srv := &http.Server{
-		Addr:    ":8001",
-		Handler: mux,
+	router := mux.NewRouter()
+	router.HandleFunc("/", healthCheckHandler).Methods("GET")
+	router.HandleFunc("/publicMatch", publicMatchRequestHandler)
+	router.HandleFunc("/privateMatch", privateMatchRequestHandler)
+	router.HandleFunc("/rtcSetup", setupWebRTCConnHandler)
+
+	log.Println("starting server at port: 8080")
+	log.Fatal(http.ListenAndServe(":8080", router))
+}
+
+func healthCheckHandler(w http.ResponseWriter, r *http.Request) {
+	fmt.Fprintf(w, "matching service running!")
+}
+
+func publicMatchRequestHandler(w http.ResponseWriter, r *http.Request) {
+	log.Println("publicMatch endpoint hit!")
+	ws, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Fatal(err)
 	}
-	log.Println("starting server!")
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("listen:%+s\n", err)
+	player := playerStruct{
+		ID:        "",
+		MatchedID: "",
+		IsHost:    false,
+		Ws:        ws,
+	}
+	var matchedPlayer *playerStruct = nil
+	select {
+	case matchedPlayer = <-publicClients:
+		log.Println("Popped player to channel")
+		break
+	case <-time.After(1 * time.Second):
+		break
+	}
+	if matchedPlayer != nil {
+		matchedPlayer.IsHost = true
+		unMatchedPlayer := player.match(matchedPlayer, atomic.AddUint64(&id, 1))
+		if unMatchedPlayer != nil {
+			if unMatchedPlayer.IsHost {
+				unMatchedPlayer.IsHost = false
+			}
+			publicClients <- unMatchedPlayer
+		} else {
+			log.Println("Successfully setup a public match!")
+		}
+	} else {
+		log.Println("Pushing player to channel")
+		publicClients <- &player
+	}
+}
+
+func setupWebRTCConnHandler(w http.ResponseWriter, r *http.Request) {
+	loginID := r.Header.Get("login-id")
+	s := strings.Split(loginID, "_")
+	ws, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if s[1] == "client" {
+		var hostPlayer interface{}
+		var loaded bool
+		seconds := 10
+		for {
+			hostPlayer, loaded = registeredClients.LoadAndDelete(s[0] + "_host")
+			if !loaded {
+				log.Println("Could not find the host for this client")
+				time.Sleep(time.Second * 1)
+				seconds--
+				if seconds == 0 {
+					break
+				}
+				continue
+			}
+			break
+		}
+		host, ok := hostPlayer.(*websocket.Conn)
+		if !ok {
+			// TODO: return error saying something is wrong
+			log.Println("Error converting host to websocket connection")
+		}
+		log.Println("Found Peers!: starting to listen")
+		go listenWebSocketConn(ws, host, false, loginID)
+		go listenWebSocketConn(host, ws, true, s[0]+"_host")
+	} else {
+		log.Println("Adding player to registered clients: " + loginID)
+		registeredClients.Store(loginID, ws)
+	}
+}
+
+func privateMatchRequestHandler(w http.ResponseWriter, r *http.Request) {
+	ws, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	player := playerStruct{
+		ID:        "",
+		MatchedID: "",
+		IsHost:    false,
+		Ws:        ws,
+	}
+	code := r.Header.Get("room-code")
+	if code == "" {
+		// this request is from a user who wants to host a private game
+		codeGenerated := ""
+		for {
+			codeGenerated = randStringBytesMaskImprSrcSB(5)
+			_, ok := privateClients.Load(codeGenerated)
+			if !ok {
+				break
+			}
+		}
+		log.Println("room code is: " + codeGenerated)
+		room := roomStruct{
+			Code: codeGenerated,
+		}
+		player.Ws.WriteJSON(room)
+		log.Println("Adding host to private client pool")
+		player.IsHost = true
+		privateClients.Store(codeGenerated, &player)
+	} else {
+		// this request is from a user who wants to join a private game
+		var hostPlayer interface{}
+		var loaded bool
+		seconds := 10
+		for {
+			hostPlayer, loaded = privateClients.LoadAndDelete(code)
+			if !loaded {
+				log.Println("Could not find the host for this client in private game pool")
+				time.Sleep(time.Second * 1)
+				seconds--
+				if seconds == 0 {
+					break
+				}
+				continue
+			}
+			break
+		}
+		host, ok := hostPlayer.(*playerStruct)
+		if !ok {
+			// TODO: return error saying something is wrong
+			log.Println("Error converting host to websocket connection")
+		}
+		unMatchedPlayer := player.match(host, atomic.AddUint64(&id, 1))
+		if unMatchedPlayer != nil {
+			if unMatchedPlayer.IsHost {
+				privateClients.Store(code, unMatchedPlayer)
+			}
+		} else {
+			log.Println("Successfully setup a private match!")
+		}
 	}
 }

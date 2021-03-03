@@ -1,63 +1,145 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
+	"time"
+
+	"github.com/gorilla/websocket"
 )
 
-type MatchingResult struct {
-	MatchedIPAddress string `json:"matched_ip_address"`
-	IsServer bool `json:"is_server"`
+type matchResponse struct {
+	ID        string `json:"id"`
+	MatchedID string `json:"matched_id"`
+	IsHost    bool   `json:"is_host"`
 }
 
-type MatchingRequest struct {
-	IpAddress string `json:"ip_address"`
+type signalMessage struct {
+	Text string `json:"text"`
 }
 
-func matchedPlayerHandler(w http.ResponseWriter, r *http.Request) {
-	body, err := ioutil.ReadAll(r.Body)
-	if err != nil {
-		panic(err)
-	}
-	var m MatchingResult
-	err = json.Unmarshal(body, &m)
-	if err != nil {
-		panic(err)
-	}
-	log.Println(m)
-	w.WriteHeader(http.StatusOK)
+type roomStruct struct {
+	Code string `json:"room_code"`
 }
 
-func main()  {
-	port := os.Args[1]
-	serviceHost := os.Args[2]
-	http.HandleFunc("/", matchedPlayerHandler)
+func socketCloseHandler(code int, text string) error {
+	log.Println("WebSocket closed with code: {} and message: "+text, code)
+	return &websocket.CloseError{
+		Code: code,
+		Text: text,
+	}
+}
 
-	ipAddress := "http://localhost:" + port
-	payload := &MatchingRequest{IpAddress: ipAddress}
-	payloadBytes, err := json.Marshal(payload)
+func main() {
+	argsWithProg := os.Args
+	serverURL := "ws://localhost:8080"
+	// req, err := http.NewRequest("CONNECT", serverURL+"/publicMatch", nil)
+	req, err := http.NewRequest("CONNECT", serverURL+"/privateMatch", nil)
 	if err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
-	req, err := http.NewRequest("POST", serviceHost, bytes.NewBuffer(payloadBytes))
+	if len(argsWithProg) > 1 {
+		req.Header.Add("room-code", argsWithProg[1])
+	}
+	dialer := websocket.Dialer{
+		Proxy:            http.ProxyFromEnvironment,
+		HandshakeTimeout: 45 * time.Second,
+	}
+	// clientConn, resp, err := dialer.Dial(serverURL+"/publicMatch", req.Header)
+	clientConn, resp, err := dialer.Dial(serverURL+"/privateMatch", req.Header)
 	if err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		panic(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusOK {
-		if err := http.ListenAndServe(":" + port, nil); err != nil {
+	clientConn.SetCloseHandler(socketCloseHandler)
+	log.Println("Resp code is: " + resp.Status)
+	var message interface{}
+	matchResp := matchResponse{}
+	// find partner to play
+	for {
+		if err = clientConn.ReadJSON(&message); err != nil {
+			log.Println(err)
+			clientConn.Close()
+			break
+		}
+		log.Println(message)
+		msgMap, msgErr := message.(map[string]interface{})
+		if !msgErr {
+			log.Println("Could not conver message to map")
+			break
+		}
+		b, err := json.Marshal(msgMap)
+		if err != nil {
 			panic(err)
 		}
+		json.Unmarshal(b, &matchResp)
+		log.Println(matchResp)
 	}
+	// setup connection to this partner
+	req, err = http.NewRequest("CONNECT", serverURL+"/rtcSetup", nil)
+	req.Header.Add("login-id", matchResp.ID)
+	rtcConn, _, err := dialer.Dial(serverURL+"/rtcSetup", req.Header)
+	if err != nil {
+		log.Fatal(err)
+	}
+	rtcConn.SetCloseHandler(socketCloseHandler)
+	signalResp := signalMessage{}
+	if matchResp.IsHost {
+		for {
+			if err = rtcConn.ReadJSON(&message); err != nil {
+				log.Println(err)
+				rtcConn.Close()
+				break
+			}
+			msgMap, msgErr := message.(map[string]interface{})
+			if !msgErr {
+				log.Println("Could not conver message to map")
+				break
+			}
+			b, err := json.Marshal(msgMap)
+			if err != nil {
+				panic(err)
+			}
+			json.Unmarshal(b, &signalResp)
+			log.Println(signalResp)
+			if signalResp.Text == "Your Turn" {
+				signalResp.Text = "Hi I am server"
+				rtcConn.WriteJSON(signalResp)
+				signalResp.Text = "Bye"
+				rtcConn.WriteJSON(signalResp)
+				rtcConn.Close()
+				break
+			}
+		}
+	} else {
+		signalResp.Text = "Hi this is client"
+		rtcConn.WriteJSON(signalResp)
+		signalResp.Text = "I am talking to you"
+		rtcConn.WriteJSON(signalResp)
+		signalResp.Text = "Your Turn"
+		rtcConn.WriteJSON(signalResp)
+		for {
+			if err = rtcConn.ReadJSON(&message); err != nil {
+				log.Println(err)
+				rtcConn.Close()
+				break
+			}
+			msgMap, msgErr := message.(map[string]interface{})
+			if !msgErr {
+				log.Println("Could not conver message to map")
+				break
+			}
+			b, err := json.Marshal(msgMap)
+			if err != nil {
+				panic(err)
+			}
+			json.Unmarshal(b, &signalResp)
+			log.Println(signalResp)
+			if signalResp.Text == "Bye" {
+				break
+			}
+		}
+	}
+	rtcConn.Close()
 }
