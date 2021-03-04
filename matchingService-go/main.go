@@ -47,6 +47,26 @@ func (p playerStruct) match(mp *playerStruct, matchID uint64) *playerStruct {
 	return nil
 }
 
+func setupPublicMatches() {
+	var client *playerStruct = nil
+	var host *playerStruct = nil
+	for {
+		if client == nil {
+			client = <-publicClients
+		}
+		if host == nil {
+			host = <-publicClients
+		}
+		host.IsHost = true
+		unMatchedPlayer := client.match(host, atomic.AddUint64(&id, 1))
+		host = unMatchedPlayer
+		client = nil
+		if client == nil {
+			log.Println("Successfully setup a public match!")
+		}
+	}
+}
+
 var privateClients sync.Map
 var registeredClients sync.Map
 var publicClients = make(chan *playerStruct, 1000)
@@ -86,6 +106,7 @@ func listenWebSocketConn(conn *websocket.Conn, sendConn *websocket.Conn, isConnH
 	conn.SetReadDeadline(timeout)
 	sendConn.SetWriteDeadline(timeout)
 	var message interface{}
+	messagesSent := 0
 	for {
 		err := conn.ReadJSON(&message)
 		if err != nil {
@@ -99,11 +120,13 @@ func listenWebSocketConn(conn *websocket.Conn, sendConn *websocket.Conn, isConnH
 			break
 		}
 		log.Println(loginID + ": forwarded a message")
+		messagesSent++
 	}
 	log.Println("Timed-out/Done so closing connection for " + loginID)
-	if isConnHost {
+	if isConnHost && messagesSent > 0 {
 		conn.Close()
 		sendConn.Close()
+		registeredClients.Delete(loginID)
 	}
 }
 
@@ -115,6 +138,7 @@ func main() {
 	router.HandleFunc("/rtcSetup", setupWebRTCConnHandler)
 
 	log.Println("starting server at port: 8080")
+	go setupPublicMatches()
 	log.Fatal(http.ListenAndServe(":8080", router))
 }
 
@@ -123,7 +147,6 @@ func healthCheckHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func publicMatchRequestHandler(w http.ResponseWriter, r *http.Request) {
-	log.Println("publicMatch endpoint hit!")
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Fatal(err)
@@ -134,29 +157,8 @@ func publicMatchRequestHandler(w http.ResponseWriter, r *http.Request) {
 		IsHost:    false,
 		Ws:        ws,
 	}
-	var matchedPlayer *playerStruct = nil
-	select {
-	case matchedPlayer = <-publicClients:
-		log.Println("Popped player to channel")
-		break
-	case <-time.After(1 * time.Second):
-		break
-	}
-	if matchedPlayer != nil {
-		matchedPlayer.IsHost = true
-		unMatchedPlayer := player.match(matchedPlayer, atomic.AddUint64(&id, 1))
-		if unMatchedPlayer != nil {
-			if unMatchedPlayer.IsHost {
-				unMatchedPlayer.IsHost = false
-			}
-			publicClients <- unMatchedPlayer
-		} else {
-			log.Println("Successfully setup a public match!")
-		}
-	} else {
-		log.Println("Pushing player to channel")
-		publicClients <- &player
-	}
+	log.Println("Pushing player to channel")
+	publicClients <- &player
 }
 
 func setupWebRTCConnHandler(w http.ResponseWriter, r *http.Request) {
@@ -170,10 +172,11 @@ func setupWebRTCConnHandler(w http.ResponseWriter, r *http.Request) {
 		var hostPlayer interface{}
 		var loaded bool
 		seconds := 10
+		hostName := s[0] + "_host"
 		for {
-			hostPlayer, loaded = registeredClients.LoadAndDelete(s[0] + "_host")
+			hostPlayer, loaded = registeredClients.Load(hostName)
 			if !loaded {
-				log.Println("Could not find the host for this client")
+				log.Println("Could not find the host: " + hostName)
 				time.Sleep(time.Second * 1)
 				seconds--
 				if seconds == 0 {
@@ -190,7 +193,7 @@ func setupWebRTCConnHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		log.Println("Found Peers!: starting to listen")
 		go listenWebSocketConn(ws, host, false, loginID)
-		go listenWebSocketConn(host, ws, true, s[0]+"_host")
+		go listenWebSocketConn(host, ws, true, hostName)
 	} else {
 		log.Println("Adding player to registered clients: " + loginID)
 		registeredClients.Store(loginID, ws)
@@ -219,7 +222,6 @@ func privateMatchRequestHandler(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 		}
-		log.Println("room code is: " + codeGenerated)
 		room := roomStruct{
 			Code: codeGenerated,
 		}
@@ -233,7 +235,7 @@ func privateMatchRequestHandler(w http.ResponseWriter, r *http.Request) {
 		var loaded bool
 		seconds := 10
 		for {
-			hostPlayer, loaded = privateClients.LoadAndDelete(code)
+			hostPlayer, loaded = privateClients.Load(code)
 			if !loaded {
 				log.Println("Could not find the host for this client in private game pool")
 				time.Sleep(time.Second * 1)
@@ -251,12 +253,9 @@ func privateMatchRequestHandler(w http.ResponseWriter, r *http.Request) {
 			log.Println("Error converting host to websocket connection")
 		}
 		unMatchedPlayer := player.match(host, atomic.AddUint64(&id, 1))
-		if unMatchedPlayer != nil {
-			if unMatchedPlayer.IsHost {
-				privateClients.Store(code, unMatchedPlayer)
-			}
-		} else {
+		if unMatchedPlayer == nil {
 			log.Println("Successfully setup a private match!")
+			privateClients.Delete(code)
 		}
 	}
 }

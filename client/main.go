@@ -108,8 +108,7 @@ func main() {
 				rtcConn.WriteJSON(signalResp)
 				signalResp.Text = "Bye"
 				rtcConn.WriteJSON(signalResp)
-				rtcConn.Close()
-				break
+				continue
 			}
 		}
 	} else {
@@ -137,9 +136,8 @@ func main() {
 			json.Unmarshal(b, &signalResp)
 			log.Println(signalResp)
 			if signalResp.Text == "Bye" {
-				break
+				continue
 			}
 		}
 	}
-	rtcConn.Close()
 }
