@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -33,22 +32,22 @@ func socketCloseHandler(code int, text string) error {
 }
 
 func main() {
-	argsWithProg := os.Args
+	// argsWithProg := os.Args
 	serverURL := "ws://localhost:8080"
-	// req, err := http.NewRequest("CONNECT", serverURL+"/publicMatch", nil)
-	req, err := http.NewRequest("CONNECT", serverURL+"/privateMatch", nil)
+	req, err := http.NewRequest("CONNECT", serverURL+"/publicMatch", nil)
+	// req, err := http.NewRequest("CONNECT", serverURL+"/privateMatch", nil)
 	if err != nil {
 		log.Fatal(err)
 	}
-	if len(argsWithProg) > 1 {
-		req.Header.Add("room-code", argsWithProg[1])
-	}
+	// if len(argsWithProg) > 1 {
+	// 	req.Header.Add("room-code", argsWithProg[1])
+	// }
 	dialer := websocket.Dialer{
 		Proxy:            http.ProxyFromEnvironment,
 		HandshakeTimeout: 45 * time.Second,
 	}
-	// clientConn, resp, err := dialer.Dial(serverURL+"/publicMatch", req.Header)
-	clientConn, resp, err := dialer.Dial(serverURL+"/privateMatch", req.Header)
+	clientConn, resp, err := dialer.Dial(serverURL+"/publicMatch", req.Header)
+	// clientConn, resp, err := dialer.Dial(serverURL+"/privateMatch", req.Header)
 	if err != nil {
 		log.Fatal(err)
 	}

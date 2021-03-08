@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"math/rand"
@@ -26,21 +27,25 @@ type roomStruct struct {
 	Code string `json:"room_code"`
 }
 
+type roomCheckResponseMessage struct {
+	IsValid bool `json:"is_valid"`
+}
+
 func (p playerStruct) match(mp *playerStruct, matchID uint64) *playerStruct {
 	match := strconv.FormatUint(matchID, 10)
 	mp.ID = match + "_host"
 	p.ID = match + "_client"
 	mp.MatchedID = p.ID
 	p.MatchedID = mp.ID
-	err := mp.Ws.WriteJSON(&mp)
-	if err != nil {
-		mp.Ws.Close()
-		return &p
-	}
-	err = p.Ws.WriteJSON(p)
-	if err != nil {
+	err1 := p.Ws.WriteJSON(p)
+	if err1 != nil {
 		p.Ws.Close()
 		return mp
+	}
+	err2 := mp.Ws.WriteJSON(&mp)
+	if err2 != nil {
+		mp.Ws.Close()
+		return &p
 	}
 	p.Ws.Close()
 	mp.Ws.Close()
@@ -59,10 +64,16 @@ func setupPublicMatches() {
 		}
 		host.IsHost = true
 		unMatchedPlayer := client.match(host, atomic.AddUint64(&id, 1))
-		host = unMatchedPlayer
-		client = nil
-		if client == nil {
+		if unMatchedPlayer == nil {
 			log.Println("Successfully setup a public match!")
+		} else {
+			if strings.Contains(unMatchedPlayer.ID, "host") {
+				host = unMatchedPlayer
+				client = nil
+			} else {
+				host = nil
+				client = unMatchedPlayer
+			}
 		}
 	}
 }
@@ -130,9 +141,18 @@ func listenWebSocketConn(conn *websocket.Conn, sendConn *websocket.Conn, isConnH
 	}
 }
 
+func socketCloseHandler(code int, text string) error {
+	log.Println("WebSocket closed with code: {} and message: "+text, code)
+	return &websocket.CloseError{
+		Code: code,
+		Text: text,
+	}
+}
+
 func main() {
 	router := mux.NewRouter()
 	router.HandleFunc("/", healthCheckHandler).Methods("GET")
+	router.HandleFunc("/checkRoomCode", checkRoomCodeHandler).Methods("GET")
 	router.HandleFunc("/publicMatch", publicMatchRequestHandler)
 	router.HandleFunc("/privateMatch", privateMatchRequestHandler)
 	router.HandleFunc("/rtcSetup", setupWebRTCConnHandler)
@@ -146,11 +166,30 @@ func healthCheckHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "matching service running!")
 }
 
+func checkRoomCodeHandler(w http.ResponseWriter, r *http.Request) {
+	code := r.URL.Query().Get("code")
+	if code != "" {
+		_, ok := privateClients.Load(code)
+		resp := roomCheckResponseMessage{
+			IsValid: ok,
+		}
+		b, err := json.Marshal(resp)
+		if err != nil {
+			http.Error(w, "could not encode", http.StatusBadRequest)
+			return
+		}
+		w.Write(b)
+		return
+	}
+	http.Error(w, "code not sent", http.StatusBadRequest)
+}
+
 func publicMatchRequestHandler(w http.ResponseWriter, r *http.Request) {
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Fatal(err)
 	}
+	ws.SetCloseHandler(socketCloseHandler)
 	player := playerStruct{
 		ID:        "",
 		MatchedID: "",
@@ -168,6 +207,7 @@ func setupWebRTCConnHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Fatal(err)
 	}
+	ws.SetCloseHandler(socketCloseHandler)
 	if s[1] == "client" {
 		var hostPlayer interface{}
 		var loaded bool
@@ -180,7 +220,8 @@ func setupWebRTCConnHandler(w http.ResponseWriter, r *http.Request) {
 				time.Sleep(time.Second * 1)
 				seconds--
 				if seconds == 0 {
-					break
+					ws.Close()
+					return
 				}
 				continue
 			}
@@ -205,6 +246,7 @@ func privateMatchRequestHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Fatal(err)
 	}
+	ws.SetCloseHandler(socketCloseHandler)
 	player := playerStruct{
 		ID:        "",
 		MatchedID: "",
@@ -241,7 +283,8 @@ func privateMatchRequestHandler(w http.ResponseWriter, r *http.Request) {
 				time.Sleep(time.Second * 1)
 				seconds--
 				if seconds == 0 {
-					break
+					ws.Close()
+					return
 				}
 				continue
 			}
