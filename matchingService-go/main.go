@@ -113,7 +113,7 @@ func randStringBytesMaskImprSrcSB(n int) string {
 }
 
 func listenWebSocketConn(conn *websocket.Conn, sendConn *websocket.Conn, isConnHost bool, loginID string) {
-	timeout := time.Now().Add(time.Second * 60)
+	timeout := time.Time{}
 	conn.SetReadDeadline(timeout)
 	sendConn.SetWriteDeadline(timeout)
 	var message interface{}
@@ -135,8 +135,6 @@ func listenWebSocketConn(conn *websocket.Conn, sendConn *websocket.Conn, isConnH
 	}
 	log.Println("Timed-out/Done so closing connection for " + loginID)
 	if isConnHost && messagesSent > 0 {
-		conn.Close()
-		sendConn.Close()
 		registeredClients.Delete(loginID)
 	}
 }
