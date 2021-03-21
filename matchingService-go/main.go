@@ -194,8 +194,9 @@ func listenWebSocketConn(conn *websocket.Conn, sendConn *websocket.Conn, isConnH
 	}
 	log.Println("Timed-out/Done so closing connection for " + loginID)
 	if !isConnHost {
-		conn.Close()
 		writeWait := time.Duration(30 * time.Second)
+		conn.WriteControl(websocket.CloseMessage, []byte{}, time.Now().Add(writeWait))
+		conn.Close()
 		sendConn.WriteControl(websocket.CloseMessage, []byte{}, time.Now().Add(writeWait))
 		sendConn.Close()
 	} else {
