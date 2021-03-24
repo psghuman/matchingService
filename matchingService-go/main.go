@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -68,6 +69,11 @@ func randStringBytesMaskImprSrcSB(n int) string {
 	return sb.String()
 }
 
+var numPlayersCreated uint64
+var numPublicMatches uint64
+var numPrivateMatches uint64
+var version string
+
 func main() {
 	router := mux.NewRouter()
 	router.HandleFunc("/", healthCheckHandler).Methods("GET")
@@ -75,12 +81,18 @@ func main() {
 	router.HandleFunc("/createUser", registerUserHandler).Methods("GET")
 	router.HandleFunc("/closeSocket", playerSocketCloseHandler).Methods("GET")
 	router.HandleFunc("/deleteUser", deleteUserHandler).Methods("GET")
+	router.HandleFunc("/stats", getStatistics).Methods("GET")
+	router.HandleFunc("/version", getVersion).Methods("GET")
 	router.HandleFunc("/publicMatch", publicMatchRequestHandler)
 	router.HandleFunc("/privateMatch", privateMatchRequestHandler)
 	router.HandleFunc("/rtcSetup", setupWebRTCConnHandler)
 
 	log.Println("starting server at port: 8080")
 	go setupPublicMatches()
+	numPlayersCreated = 0
+	numPublicMatches = 0
+	numPrivateMatches = 0
+	version = "1.0.0"
 	log.Fatal(http.ListenAndServe(":8080", router))
 }
 
@@ -158,6 +170,7 @@ func setupPublicMatches() {
 			log.Println("Successfully setup a public match!")
 			clientID = ""
 			hostID = ""
+			go updatePublicMatchesCount()
 		} else {
 			if unMatchedPlayer.IsHost {
 				host = unMatchedPlayer
@@ -226,6 +239,26 @@ func handleWebSocketClose(c *websocket.Conn) {
 	}
 }
 
+func updatePlayerCount() {
+	atomic.AddUint64(&numPlayersCreated, 1)
+}
+
+func updatePublicMatchesCount() {
+	atomic.AddUint64(&numPublicMatches, 1)
+}
+
+func updatePrivateMatchesCount() {
+	atomic.AddUint64(&numPrivateMatches, 1)
+}
+
+func getStatistics(w http.ResponseWriter, r *http.Request) {
+	fmt.Fprintf(w, "Players: %d\nPublic: %d\nPrivate: %d\n", numPlayersCreated, numPublicMatches, numPrivateMatches)
+}
+
+func getVersion(w http.ResponseWriter, r *http.Request) {
+	fmt.Fprintf(w, "Version: "+version)
+}
+
 func healthCheckHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "matching service running!")
 }
@@ -274,10 +307,19 @@ func playerSocketCloseHandler(w http.ResponseWriter, r *http.Request) {
 
 func registerUserHandler(w http.ResponseWriter, r *http.Request) {
 	id := ""
-	version := "1.0.0"
 	queryVersion := r.URL.Query().Get("v")
-	if queryVersion != version {
-		http.Error(w, "Error! incorrect game version. Please Update!", http.StatusBadRequest)
+	if queryVersion == "" {
+		http.Error(w, "Error! version not sent!", http.StatusBadRequest)
+		return
+	}
+	s1 := strings.Split(version, ".")
+	s2 := strings.Split(queryVersion, ".")
+	if len(s1) != len(s2) {
+		http.Error(w, "Error! incorrect version formatting!", http.StatusBadRequest)
+		return
+	}
+	if s1[0] != s2[0] || s1[1] != s2[1] {
+		http.Error(w, "Error! older version sent!", http.StatusBadRequest)
 		return
 	}
 	for {
@@ -303,6 +345,7 @@ func registerUserHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			w.Write(b)
 			log.Println("sent message! ending handler call")
+			go updatePlayerCount()
 			return
 		}
 	}
@@ -310,8 +353,13 @@ func registerUserHandler(w http.ResponseWriter, r *http.Request) {
 
 func deleteUserHandler(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
+	code := r.URL.Query().Get("room")
 	if id != "" {
 		players.Delete(id)
+		if code != "" {
+			privateMatchRooms.Delete(code)
+			log.Println("removed room with code: " + code)
+		}
 		fmt.Fprintf(w, "deleted!")
 		log.Println("deleted user with id {}", id)
 		return
@@ -441,6 +489,7 @@ func privateMatchRequestHandler(w http.ResponseWriter, r *http.Request) {
 			unMatchedPlayer := player.match(host)
 			if unMatchedPlayer == nil {
 				log.Println("Successfully setup a private match!")
+				go updatePrivateMatchesCount()
 			}
 		}
 	}
