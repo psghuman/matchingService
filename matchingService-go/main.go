@@ -98,25 +98,31 @@ func main() {
 
 func (p playerStruct) match(mp *playerStruct) *playerStruct {
 	if p.Ws == nil {
+		log.Println("found ws while matching to be nil for " + p.ID)
 		return mp
 	}
 	if mp.Ws == nil {
+		log.Println("found ws while matching to be nil for " + mp.ID)
 		return &p
 	}
 	mp.MatchedID = p.ID
 	p.MatchedID = mp.ID
 	err1 := p.Ws.WriteJSON(p)
 	if err1 != nil {
-		go handleWebSocketClose(p.Ws, p.ID)
+		go handleWebSocketClose(p.Ws)
+		p.Ws = nil
 		return mp
 	}
 	err2 := mp.Ws.WriteJSON(&mp)
 	if err2 != nil {
-		go handleWebSocketClose(mp.Ws, mp.ID)
+		go handleWebSocketClose(mp.Ws)
+		mp.Ws = nil
 		return &p
 	}
-	go handleWebSocketClose(p.Ws, p.ID)
-	go handleWebSocketClose(mp.Ws, mp.ID)
+	go handleWebSocketClose(p.Ws)
+	p.Ws = nil
+	go handleWebSocketClose(mp.Ws)
+	mp.Ws = nil
 	return nil
 }
 
@@ -226,7 +232,7 @@ func socketCloseHandler(code int, text string) error {
 	}
 }
 
-func handleWebSocketClose(c *websocket.Conn, id string) {
+func handleWebSocketClose(c *websocket.Conn) {
 	if c == nil {
 		return
 	}
@@ -238,8 +244,6 @@ func handleWebSocketClose(c *websocket.Conn, id string) {
 			break
 		}
 	}
-	c = nil
-	log.Println("set ws for player id: " + id + " to nil")
 }
 
 func updatePlayerCount() {
@@ -294,7 +298,9 @@ func playerSocketCloseHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "id not correct", http.StatusBadRequest)
 			return
 		}
-		go handleWebSocketClose(player.Ws, player.ID)
+		go handleWebSocketClose(player.Ws)
+		player.Ws = nil
+		log.Println("set ws for player id: " + id + " to nil")
 		_, loaded := privateMatchRooms.Load(code)
 		if loaded {
 			privateMatchRooms.Delete(code)
