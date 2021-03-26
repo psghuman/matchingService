@@ -97,25 +97,26 @@ func main() {
 }
 
 func (p playerStruct) match(mp *playerStruct) *playerStruct {
+	if p.Ws == nil {
+		return mp
+	}
+	if mp.Ws == nil {
+		return &p
+	}
 	mp.MatchedID = p.ID
 	p.MatchedID = mp.ID
 	err1 := p.Ws.WriteJSON(p)
 	if err1 != nil {
-		p.Ws.Close()
+		go handleWebSocketClose(p.Ws, p.ID)
 		return mp
 	}
 	err2 := mp.Ws.WriteJSON(&mp)
 	if err2 != nil {
-		mp.Ws.Close()
+		go handleWebSocketClose(mp.Ws, mp.ID)
 		return &p
 	}
-	writeWait := time.Duration(30 * time.Second)
-	p.Ws.WriteControl(websocket.CloseMessage, []byte{}, time.Now().Add(writeWait))
-	p.Ws.Close()
-	p.Ws = nil
-	mp.Ws.WriteControl(websocket.CloseMessage, []byte{}, time.Now().Add(writeWait))
-	mp.Ws.Close()
-	mp.Ws = nil
+	go handleWebSocketClose(p.Ws, p.ID)
+	go handleWebSocketClose(mp.Ws, mp.ID)
 	return nil
 }
 
@@ -225,7 +226,7 @@ func socketCloseHandler(code int, text string) error {
 	}
 }
 
-func handleWebSocketClose(c *websocket.Conn) {
+func handleWebSocketClose(c *websocket.Conn, id string) {
 	if c == nil {
 		return
 	}
@@ -237,6 +238,8 @@ func handleWebSocketClose(c *websocket.Conn) {
 			break
 		}
 	}
+	c = nil
+	log.Println("set ws for player id: " + id + " to nil")
 }
 
 func updatePlayerCount() {
@@ -291,9 +294,7 @@ func playerSocketCloseHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "id not correct", http.StatusBadRequest)
 			return
 		}
-		go handleWebSocketClose(player.Ws)
-		player.Ws = nil
-		log.Println("set ws for player id: " + id + " to nil")
+		go handleWebSocketClose(player.Ws, player.ID)
 		_, loaded := privateMatchRooms.Load(code)
 		if loaded {
 			privateMatchRooms.Delete(code)
@@ -490,6 +491,8 @@ func privateMatchRequestHandler(w http.ResponseWriter, r *http.Request) {
 			if unMatchedPlayer == nil {
 				log.Println("Successfully setup a private match!")
 				go updatePrivateMatchesCount()
+			} else {
+				log.Println("Error! could not setup a private match!")
 			}
 		}
 	}
