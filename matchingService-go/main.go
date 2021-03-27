@@ -109,19 +109,22 @@ func (p playerStruct) match(mp *playerStruct) *playerStruct {
 	p.MatchedID = mp.ID
 	err1 := p.Ws.WriteJSON(p)
 	if err1 != nil {
-		go handleWebSocketClose(p.Ws)
+		p.Ws.Close()
 		p.Ws = nil
 		return mp
 	}
 	err2 := mp.Ws.WriteJSON(&mp)
 	if err2 != nil {
-		go handleWebSocketClose(mp.Ws)
+		mp.Ws.Close()
 		mp.Ws = nil
 		return &p
 	}
-	go handleWebSocketClose(p.Ws)
+	writeWait := time.Duration(30 * time.Second)
+	p.Ws.WriteControl(websocket.CloseMessage, []byte{}, time.Now().Add(writeWait))
+	p.Ws.Close()
 	p.Ws = nil
-	go handleWebSocketClose(mp.Ws)
+	mp.Ws.WriteControl(websocket.CloseMessage, []byte{}, time.Now().Add(writeWait))
+	mp.Ws.Close()
 	mp.Ws = nil
 	return nil
 }
