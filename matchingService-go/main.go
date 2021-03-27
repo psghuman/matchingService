@@ -92,7 +92,7 @@ func main() {
 	numPlayersCreated = 0
 	numPublicMatches = 0
 	numPrivateMatches = 0
-	version = "1.1.0"
+	version = "1.2.0"
 	log.Fatal(http.ListenAndServe(":8080", router))
 }
 
