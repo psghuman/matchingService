@@ -195,12 +195,13 @@ func setupPublicMatches() {
 	}
 }
 
-func listenWebSocketConn(conn *websocket.Conn, sendConn *websocket.Conn, isConnHost bool, loginID string) {
+func listenWebSocketConn(conn *websocket.Conn, sendConn *websocket.Conn, isConnHost bool, loginID string, ch chan<- bool) {
 	timeout := time.Time{}
 	conn.SetReadDeadline(timeout)
 	sendConn.SetWriteDeadline(timeout)
 	var message interface{}
 	messagesSent := 0
+	ch <- true
 	for {
 		err := conn.ReadJSON(&message)
 		if err != nil {
@@ -433,8 +434,11 @@ func setupWebRTCConnHandler(w http.ResponseWriter, r *http.Request) {
 			log.Println("Error converting host to websocket connection")
 		}
 		log.Println("Found Peers!: starting to listen")
-		go listenWebSocketConn(ws, host, false, loginID)
-		go listenWebSocketConn(host, ws, true, hostID)
+		var syncConn = make(chan bool, 2)
+		go listenWebSocketConn(ws, host, false, loginID, syncConn)
+		go listenWebSocketConn(host, ws, true, hostID, syncConn)
+		_ = <-syncConn
+		_ = <-syncConn
 	} else {
 		log.Println("Adding player to registered clients: " + loginID)
 		registeredClients.Store(loginID, ws)
